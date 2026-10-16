@@ -1,0 +1,37 @@
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Local databases and indices
+.data/
+*.db
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.env.local
+
+# Testing and linting caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Packaging and distribution
+dist/
+build/
+*.egg-info/
+
+# Chainlit
+.chainlit/
+chainlit.md
+
+# Evaluation results (keep latest.md, ignore timestamped JSON runs)
+evals/results/*.json
+!evals/results/latest.md
