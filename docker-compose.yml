@@ -1,0 +1,38 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: helpdesk-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  api:
+    build: .
+    container_name: helpdesk-api
+    depends_on:
+      - qdrant
+    env_file:
+      - .env
+    environment:
+      - HELPDESK_QDRANT_URL=http://qdrant:6333
+      - HELPDESK_TOOL_BACKEND=local
+    ports:
+      - "8000:8000"
+
+  ui:
+    build: .
+    container_name: helpdesk-ui
+    depends_on:
+      - api
+    env_file:
+      - .env
+    environment:
+      - HELPDESK_API_URL=http://api:8000
+    command: ["chainlit", "run", "src/helpdesk/ui/app.py", "--host", "0.0.0.0", "--port", "8080"]
+    ports:
+      - "8080:8080"
+
+volumes:
+  qdrant_data:
