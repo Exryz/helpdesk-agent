@@ -5,7 +5,7 @@
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Type Checked: mypy](https://img.shields.io/badge/mypy-checked-blue)](https://mypy-lang.org/)
 
-An IT helpdesk agent that answers support questions from a Markdown knowledge base with section citations (`[KB-001]`), executes ticket actions over the Model Context Protocol (MCP), logs per-request token/latency/cost telemetry to SQLite, and includes a retrieval & agent evaluation suite. This project was mostly derived from the ISIT-Chatbot I developed during my Internship, with major changes to the llm used, This mostly just also serves as a demo for a future continued project of mine.
+An IT helpdesk agent that answers support questions from a Markdown knowledge base with section citations (`[KB-001]`), executes ticket actions over the Model Context Protocol (MCP), logs per-request token/latency/cost telemetry to SQLite, and includes a retrieval & agent evaluation suite. This project was mostly derived from the ISIT-Chatbot I developed during my Internship, with major changes to the LLM used. This mostly just also serves as a demo for a future continued project of mine.
 
 ---
 
