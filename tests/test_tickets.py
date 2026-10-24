@@ -162,3 +162,13 @@ def test_ticket_api_routes() -> None:
     res_patch = client.patch(f"/tickets/{new_key}/status", json=patch_payload)
     assert res_patch.status_code == 200
     assert res_patch.json()["status"] == "in_progress"
+
+    # GET /portal/tickets/{key} and /portal/new (HTML portal pages)
+    res_portal = client.get(f"/portal/tickets/{new_key}")
+    assert res_portal.status_code == 200
+    assert 'data-field="title">Need Visio license</h1>' in res_portal.text
+    assert 'data-field="requester">engineer.joe</dd>' in res_portal.text
+
+    res_form = client.get("/portal/new")
+    assert res_form.status_code == 200
+    assert '<form id="ticket-form"' in res_form.text
