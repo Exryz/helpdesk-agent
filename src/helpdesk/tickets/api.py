@@ -12,6 +12,7 @@ from fastapi import APIRouter, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from helpdesk.config import get_settings
+from helpdesk.tickets.portal import build_portal_router
 from helpdesk.tickets.repository import (
     Priority,
     Status,
@@ -87,4 +88,5 @@ def create_app(repo: TicketRepository | None = None) -> FastAPI:
     repo = repo or TicketRepository.from_path(get_settings().tickets_db)
     app = FastAPI(title="Mock Ticket API", version="0.1.0")
     app.include_router(build_router(repo))
+    app.include_router(build_portal_router(repo))
     return app

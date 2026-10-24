@@ -17,6 +17,7 @@ from helpdesk.llm import LiteLLMClient
 from helpdesk.retrieval import build_retriever
 from helpdesk.telemetry import Telemetry
 from helpdesk.tickets.api import build_router
+from helpdesk.tickets.portal import build_portal_router
 from helpdesk.tickets.repository import TicketRepository
 
 
@@ -80,8 +81,9 @@ def create_app(
     app.state.repo = actual_repo
     app.state.conversations = conversations
 
-    # Mount ticket management router
+    # Mount ticket management and HTML portal routers
     app.include_router(build_router(actual_repo))
+    app.include_router(build_portal_router(actual_repo))
 
     @app.get("/health")
     def health() -> dict[str, str]:
