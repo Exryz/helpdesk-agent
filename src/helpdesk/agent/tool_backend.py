@@ -108,11 +108,12 @@ class McpToolBackend:
         tools_result = await session.list_tools()
         schemas_list: list[dict[str, Any]] = []
         for t in tools_result.tools:
+            raw_schema = getattr(t, "inputSchema", None) or getattr(t, "input_schema", None)
             schemas_list.append(
                 {
                     "name": t.name,
                     "description": t.description or "",
-                    "parameters": t.inputSchema if isinstance(t.inputSchema, dict) else {},
+                    "parameters": raw_schema if isinstance(raw_schema, dict) else {},
                 }
             )
         return schemas_list
