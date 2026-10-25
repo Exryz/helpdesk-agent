@@ -13,7 +13,7 @@ authors = [{ name = "Paul Andrei Datinguinoo" }]
 dependencies = [
     "litellm>=1.50",
     "langgraph>=0.2",
-    "mcp>=1.2",
+    "mcp>=1.2,<2.0",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "sqlmodel>=0.0.21",
