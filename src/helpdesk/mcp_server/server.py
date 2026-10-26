@@ -61,6 +61,36 @@ def build_server(tools: TicketTools) -> FastMCP:
         e.g. reopen a resolved ticket by setting 'open'."""
         return tools.update_ticket_status(ticket_key, status, note)
 
+    @mcp.tool()
+    def scrape_ticket_page(
+        url: str | None = None, html: str | None = None
+    ) -> dict[str, Any]:
+        """Scrape structured ticket details from a legacy portal URL or HTML snippet."""
+        return tools.scrape_ticket_page(url=url, html=html)
+
+    @mcp.tool()
+    def autofill_ticket_form(
+        title: str,
+        requester: str,
+        priority: str = "medium",
+        category: str = "General",
+        description: str = "",
+        url: str | None = None,
+        submit: bool = False,
+        screenshot_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Auto-fill a web support ticket form with draft fields (and optional screenshot preview)."""
+        return tools.autofill_ticket_form(
+            title=title,
+            requester=requester,
+            priority=priority,
+            category=category,
+            description=description,
+            url=url,
+            submit=submit,
+            screenshot_path=screenshot_path,
+        )
+
     return mcp
 
 
