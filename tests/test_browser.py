@@ -9,6 +9,7 @@ from helpdesk.browser.autofill import TicketFormDraft, build_autofill_plan
 from helpdesk.browser.scraper import parse_ticket_html
 from helpdesk.tickets.api import create_app
 from helpdesk.tickets.repository import TicketRepository
+from helpdesk.tickets.tools import TicketTools
 
 
 def test_parse_ticket_html_from_portal_route() -> None:
@@ -57,4 +58,30 @@ def test_ticket_form_draft_rejects_invalid_priority() -> None:
     draft = TicketFormDraft(title="Broken dock", requester="paul.d", priority="urgent")
     with pytest.raises(ValueError, match="Invalid priority"):
         build_autofill_plan(draft)
+
+
+def test_browser_tools_via_ticket_tools_dispatch() -> None:
+    repo = TicketRepository.from_path(":memory:", seed=True)
+    tools = TicketTools(repo)
+    client = TestClient(create_app(repo))
+
+    html_doc = client.get("/portal/tickets/TCK-1001").text
+    scraped = tools.call("scrape_ticket_page", {"html": html_doc})
+    assert scraped["key"] == "TCK-1001"
+    assert scraped["requester"] == "maria.santos"
+
+    autofill = tools.call(
+        "autofill_ticket_form",
+        {
+            "title": scraped["title"],
+            "requester": scraped["requester"],
+            "priority": scraped["priority"],
+            "category": scraped["category"],
+            "description": scraped["description"],
+        },
+    )
+    assert autofill["filled"] is False
+    assert autofill["fields"]["title"] == "Outlook not syncing on laptop"
+    assert len(autofill["plan"]) == 5
+
 

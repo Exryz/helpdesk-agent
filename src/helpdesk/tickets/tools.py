@@ -6,9 +6,23 @@ instead of raised, so the LLM can read the problem and recover.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from helpdesk.browser.autofill import (
+    TicketFormDraft,
+     build_autofill_plan,
+)
+from helpdesk.browser.autofill import (
+    autofill_ticket_form as run_autofill_ticket_form,
+)
+from helpdesk.browser.scraper import (
+    parse_ticket_html,
+)
+from helpdesk.browser.scraper import (
+    scrape_ticket_page as run_scrape_ticket_page,
+)
 from helpdesk.tickets.repository import (
     Priority,
     Status,
@@ -96,6 +110,61 @@ class TicketTools:
             lambda: {"updated": True, **ticket_to_dict(self.repo.update_status(ticket_key, status, note))}
         )
 
+    def scrape_ticket_page(
+        self, url: str | None = None, html: str | None = None
+    ) -> dict[str, Any]:
+        """Scrape structured ticket details from a portal URL (via Playwright) or raw HTML."""
+
+        def run() -> dict[str, Any]:
+            if html:
+                return parse_ticket_html(html).to_dict()
+            if not url:
+                raise ValueError("Provide either 'url' or 'html' to scrape_ticket_page")
+            return asyncio.run(run_scrape_ticket_page(url)).to_dict()
+
+        return self._safe(run)
+
+    def autofill_ticket_form(
+        self,
+        title: str,
+        requester: str,
+        priority: str = "medium",
+        category: str = "General",
+        description: str = "",
+        url: str | None = None,
+        submit: bool = False,
+        screenshot_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Build an autofill plan or populate a web ticket form via Playwright."""
+
+        def run() -> dict[str, Any]:
+            draft = TicketFormDraft(
+                title=title,
+                requester=requester,
+                priority=priority,
+                category=category,
+                description=description,
+            ).validated()
+            plan = build_autofill_plan(draft)
+            if not url:
+                return {
+                    "filled": False,
+                    "submitted": False,
+                    "fields": draft.to_dict(),
+                    "plan": plan,
+                }
+            res = asyncio.run(
+                run_autofill_ticket_form(
+                    url=url,
+                    draft=draft,
+                    submit=submit,
+                    screenshot_path=screenshot_path,
+                )
+            )
+            return {**res.to_dict(), "plan": plan}
+
+        return self._safe(run)
+
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         fn = getattr(self, name, None)
         if name not in TOOL_NAMES or fn is None:
@@ -170,6 +239,37 @@ TICKET_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "note": {"type": "string", "description": "Reason for the change"},
             },
             "required": ["ticket_key", "status"],
+        },
+    },
+    {
+        "name": "scrape_ticket_page",
+        "description": "Scrape ticket details from a legacy portal URL or HTML snippet.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Portal ticket URL to scrape"},
+                "html": {"type": "string", "description": "Optional raw HTML of the ticket page"},
+            },
+        },
+    },
+    {
+        "name": "autofill_ticket_form",
+        "description": (
+            "Auto-fill a web support ticket form with draft fields (and optional screenshot preview)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "requester": {"type": "string"},
+                "priority": {"type": "string", "enum": PRIORITIES, "default": "medium"},
+                "category": {"type": "string", "default": "General"},
+                "description": {"type": "string", "default": ""},
+                "url": {"type": "string", "description": "Optional portal form URL to open in Playwright"},
+                "submit": {"type": "boolean", "default": False},
+                "screenshot_path": {"type": "string"},
+            },
+            "required": ["title", "requester"],
         },
     },
 ]

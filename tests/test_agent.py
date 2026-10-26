@@ -142,7 +142,7 @@ async def test_mcp_tool_backend_end_to_end() -> None:
         backend = McpToolBackend(db_path=str(db_path))
         try:
             schemas = await backend.schemas()
-            assert len(schemas) == 5
+            assert len(schemas) == 7
             names = {s["name"] for s in schemas}
             expected_names = {
                 "search_tickets",
@@ -150,6 +150,8 @@ async def test_mcp_tool_backend_end_to_end() -> None:
                 "create_ticket",
                 "add_comment",
                 "update_ticket_status",
+                "scrape_ticket_page",
+                "autofill_ticket_form",
             }
             assert names == expected_names
 
