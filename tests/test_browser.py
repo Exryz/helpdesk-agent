@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import tempfile
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+from helpdesk.agent import HelpdeskAgent, LocalToolBackend, McpToolBackend
 from helpdesk.browser.autofill import TicketFormDraft, build_autofill_plan
 from helpdesk.browser.scraper import parse_ticket_html
+from helpdesk.llm import LLMResponse, ScriptedLLM, ToolCall
+from helpdesk.retrieval.hybrid import HybridRetriever
 from helpdesk.tickets.api import create_app
 from helpdesk.tickets.repository import TicketRepository
 from helpdesk.tickets.tools import TicketTools
@@ -83,5 +90,105 @@ def test_browser_tools_via_ticket_tools_dispatch() -> None:
     assert autofill["filled"] is False
     assert autofill["fields"]["title"] == "Outlook not syncing on laptop"
     assert len(autofill["plan"]) == 5
+
+
+def test_browser_tools_return_error_dicts_on_bad_input() -> None:
+    repo = TicketRepository.from_path(":memory:", seed=True)
+    tools = TicketTools(repo)
+
+    missing_arg = tools.call("scrape_ticket_page", {})
+    assert "error" in missing_arg
+
+    bad_prio = tools.call(
+        "autofill_ticket_form",
+        {"title": "Dock issue", "requester": "paul.d", "priority": "invalid_prio"},
+    )
+    assert "error" in bad_prio
+
+
+@pytest.mark.asyncio
+async def test_agent_chains_scrape_and_autofill_tools(
+    fake_retriever: HybridRetriever, repo: TicketRepository, local_tools: TicketTools
+) -> None:
+    client = TestClient(create_app(repo))
+    portal_html = client.get("/portal/tickets/TCK-1003").text
+
+    scripted_llm = ScriptedLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_scrape_1",
+                        name="scrape_ticket_page",
+                        arguments={"html": portal_html},
+                    )
+                ],
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="call_autofill_2",
+                        name="autofill_ticket_form",
+                        arguments={
+                            "title": "Follow-up: VPN disconnects every 10 minutes",
+                            "requester": "paul.d",
+                            "priority": "high",
+                            "category": "Network",
+                            "description": "Escalating from TCK-1003 with AnyConnect DART logs.",
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(
+                content=(
+                    "I scraped TCK-1003 and pre-filled the follow-up ticket form for paul.d "
+                    "(High priority, Network). Would you like me to submit it?"
+                ),
+                tool_calls=[],
+            ),
+        ]
+    )
+
+    agent = HelpdeskAgent(scripted_llm, fake_retriever, LocalToolBackend(local_tools))
+    result = await agent.run("Scrape TCK-1003 from the portal and pre-fill a follow-up ticket form.")
+
+    assert result.tools_used == ["scrape_ticket_page", "autofill_ticket_form"]
+    assert len(result.tool_calls) == 2
+    assert result.tool_calls[0]["result"]["key"] == "TCK-1003"
+    assert result.tool_calls[1]["result"]["fields"]["requester"] == "paul.d"
+    assert "pre-filled" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_mcp_backend_executes_browser_tools_over_stdio() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+        db_path = Path(tmpdir) / "tickets.db"
+        repo = TicketRepository.from_path(db_path, seed=True)
+        html_doc = TestClient(create_app(repo)).get("/portal/tickets/TCK-1002").text
+        repo.engine.dispose()
+
+        backend = McpToolBackend(db_path=str(db_path))
+        try:
+            scraped = await backend.call("scrape_ticket_page", {"html": html_doc})
+            assert scraped.get("key") == "TCK-1002"
+            assert scraped.get("requester") == "john.reyes"
+
+            autofill = await backend.call(
+                "autofill_ticket_form",
+                {
+                    "title": str(scraped["title"]),
+                    "requester": str(scraped["requester"]),
+                    "priority": "medium",
+                    "category": "Accounts & Access",
+                },
+            )
+            assert autofill.get("filled") is False
+            assert len(autofill.get("plan", [])) == 5
+        finally:
+            await backend.aclose()
+            await asyncio.sleep(0.2)
+
 
 
