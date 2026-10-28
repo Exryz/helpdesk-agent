@@ -8,6 +8,7 @@ from typing import Any
 import chainlit as cl
 
 from helpdesk.agent import HelpdeskAgent, build_tool_backend
+from helpdesk.browser import extract_screenshot_paths
 from helpdesk.config import get_settings
 from helpdesk.llm import LiteLLMClient
 from helpdesk.retrieval import build_retriever
@@ -65,6 +66,12 @@ async def on_message(message: cl.Message) -> None:
     latency = stats.get("latency_ms", 0.0)
     footer = f"\n\n---\n*Cost: ${cost:.5f} | Latency: {latency:.0f}ms*"
 
+    # Attach any ticket form preview screenshots captured by Playwright
+    elements = [
+        cl.Image(name=f"ticket_form_preview_{i + 1}", path=path, display="inline")
+        for i, path in enumerate(extract_screenshot_paths(result.tool_calls))
+    ]
+
     # Update in-memory session history (keep last 10 turns = 20 messages)
     history.append({"role": "user", "content": message.content})
     history.append({"role": "assistant", "content": result.answer})
@@ -72,4 +79,4 @@ async def on_message(message: cl.Message) -> None:
         history = history[-20:]
     cl.user_session.set("history", history)
 
-    await cl.Message(content=result.answer + footer).send()
+    await cl.Message(content=result.answer + footer, elements=elements).send()

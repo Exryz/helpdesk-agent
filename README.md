@@ -196,7 +196,7 @@ mypy
 
 ## Roadmap
 
-- [ ] Playwright browser automation for scraping legacy portal ticket/asset details and auto-filling ticket forms (with screenshot preview before submit)
+- [x] Playwright browser automation for scraping legacy portal ticket/asset details and auto-filling ticket forms (with screenshot preview before submit)
 - [ ] Export SQLite telemetry to InfluxDB + Grafana dashboard
 - [ ] Streaming token responses on `/chat` (SSE) and in the Chainlit UI
 - [ ] Persistent conversation history in SQLite

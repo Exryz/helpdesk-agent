@@ -5,6 +5,7 @@ from helpdesk.browser.autofill import (
     TicketFormDraft,
     autofill_ticket_form,
     build_autofill_plan,
+    extract_screenshot_paths,
 )
 from helpdesk.browser.scraper import ScrapedTicket, parse_ticket_html, scrape_ticket_page
 
@@ -14,6 +15,7 @@ __all__ = [
     "TicketFormDraft",
     "autofill_ticket_form",
     "build_autofill_plan",
+    "extract_screenshot_paths",
     "parse_ticket_html",
     "scrape_ticket_page",
 ]
