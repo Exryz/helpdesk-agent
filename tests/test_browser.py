@@ -10,7 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from helpdesk.agent import HelpdeskAgent, LocalToolBackend, McpToolBackend
-from helpdesk.browser.autofill import TicketFormDraft, build_autofill_plan
+from helpdesk.browser.autofill import (
+    TicketFormDraft,
+    build_autofill_plan,
+    extract_screenshot_paths,
+)
 from helpdesk.browser.scraper import parse_ticket_html
 from helpdesk.llm import LLMResponse, ScriptedLLM, ToolCall
 from helpdesk.retrieval.hybrid import HybridRetriever
@@ -189,6 +193,19 @@ async def test_mcp_backend_executes_browser_tools_over_stdio() -> None:
         finally:
             await backend.aclose()
             await asyncio.sleep(0.2)
+
+
+def test_extract_screenshot_paths_filters_existing_files(tmp_path: Path) -> None:
+    shot = tmp_path / "preview.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    tool_calls = [
+        {"name": "scrape_ticket_page", "result": {"key": "TCK-1001"}},
+        {"name": "autofill_ticket_form", "result": {"screenshot_path": str(shot)}},
+        {"name": "autofill_ticket_form", "result": {"screenshot_path": str(tmp_path / "missing.png")}},
+    ]
+    assert extract_screenshot_paths(tool_calls) == [str(shot)]
+
 
 
 

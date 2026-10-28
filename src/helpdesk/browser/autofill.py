@@ -109,3 +109,16 @@ async def autofill_ticket_form(
         fields=clean.to_dict(),
         screenshot_path=saved_screenshot,
     )
+
+
+def extract_screenshot_paths(tool_calls: list[dict[str, Any]]) -> list[str]:
+    """Return existing screenshot file paths produced by browser autofill tool calls."""
+    paths: list[str] = []
+    for tc in tool_calls:
+        res = tc.get("result")
+        if isinstance(res, dict):
+            raw_path = res.get("screenshot_path")
+            if isinstance(raw_path, str) and raw_path and Path(raw_path).is_file():
+                paths.append(raw_path)
+    return paths
+
