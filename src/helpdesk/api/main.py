@@ -94,7 +94,11 @@ def create_app(
         current_agent: HelpdeskAgent = app.state.agent
         cid = request.conversation_id or uuid.uuid4().hex[:12]
 
-        history_to_use = list(request.history) if request.history is not None else list(conversations[cid])
+        history_to_use = (
+            list(request.history)
+            if request.history is not None
+            else app.state.telemetry.get_history(cid, limit=20)
+        )
 
         result = await current_agent.run(
             question=request.message,
@@ -102,13 +106,14 @@ def create_app(
             conversation_id=cid,
         )
 
-        # Update in-memory history: cap at last 10 turns (20 messages)
-        new_history = list(history_to_use)
-        new_history.append({"role": "user", "content": request.message})
-        new_history.append({"role": "assistant", "content": result.answer})
-        if len(new_history) > 20:
-            new_history = new_history[-20:]
-        conversations[cid] = new_history
+        # Persist conversation turn in SQLite (capped at last 10 turns = 20 messages)
+        app.state.telemetry.append_turn(
+            conversation_id=cid,
+            user_message=request.message,
+            assistant_message=result.answer,
+            max_messages=20,
+        )
+        conversations[cid] = app.state.telemetry.get_history(cid, limit=20)
 
         return ChatResponse(
             answer=result.answer,
@@ -128,6 +133,17 @@ def create_app(
     @app.get("/metrics/recent")
     def recent_metrics(limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
         return app.state.telemetry.recent(limit=limit)
+
+    @app.get("/conversations/{conversation_id}")
+    def get_conversation(conversation_id: str) -> dict[str, Any]:
+        messages = app.state.telemetry.get_history(conversation_id, limit=20)
+        return {"conversation_id": conversation_id, "messages": messages}
+
+    @app.delete("/conversations/{conversation_id}")
+    def delete_conversation(conversation_id: str) -> dict[str, Any]:
+        deleted = app.state.telemetry.clear_history(conversation_id)
+        conversations.pop(conversation_id, None)
+        return {"conversation_id": conversation_id, "deleted_messages": deleted}
 
     return app
 

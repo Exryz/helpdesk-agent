@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_llm_calls_request ON llm_calls(request_id);
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    ts REAL NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conv_messages_cid ON conversation_messages(conversation_id, id);
 """
 
 
@@ -167,3 +175,51 @@ class Telemetry:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- persistent conversation history ------------------------------------------------
+    def get_history(self, conversation_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT role, content FROM ("
+                "  SELECT id, role, content FROM conversation_messages "
+                "  WHERE conversation_id = ? ORDER BY id DESC LIMIT ?"
+                ") ORDER BY id ASC",
+                (conversation_id, limit),
+            ).fetchall()
+        return [{"role": str(r["role"]), "content": str(r["content"])} for r in rows]
+
+    def append_turn(
+        self,
+        conversation_id: str,
+        user_message: str,
+        assistant_message: str,
+        max_messages: int = 20,
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO conversation_messages (conversation_id, ts, role, content) "
+                "VALUES (?, ?, ?, ?)",
+                [
+                    (conversation_id, now, "user", user_message),
+                    (conversation_id, now, "assistant", assistant_message),
+                ],
+            )
+            self._conn.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ? AND id NOT IN ("
+                "  SELECT id FROM conversation_messages WHERE conversation_id = ? "
+                "  ORDER BY id DESC LIMIT ?"
+                ")",
+                (conversation_id, conversation_id, max_messages),
+            )
+            self._conn.commit()
+
+    def clear_history(self, conversation_id: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
