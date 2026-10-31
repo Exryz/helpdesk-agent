@@ -223,3 +223,49 @@ class Telemetry:
             self._conn.commit()
             return int(cur.rowcount or 0)
 
+    # ---- InfluxDB line protocol export --------------------------------------------------
+    def to_influx_lines(self, limit: int = 100) -> str:
+        """Format recent completed requests as InfluxDB line protocol records."""
+        rows = self.recent(limit=limit)
+        lines: list[str] = []
+        for r in reversed(rows):
+            status = "error" if r.get("error") else "ok"
+            lat = float(r.get("latency_ms") or 0.0)
+            pt = int(r.get("prompt_tokens") or 0)
+            ct = int(r.get("completion_tokens") or 0)
+            cost = float(r.get("cost_usd") or 0.0)
+            calls = int(r.get("llm_calls") or 0)
+            ts_ns = int(float(r.get("ts") or time.time()) * 1_000_000_000)
+            lines.append(
+                f"helpdesk_request,status={status} "
+                f"latency_ms={lat:.2f},prompt_tokens={pt}i,completion_tokens={ct}i,"
+                f"cost_usd={cost:.6f},llm_calls={calls}i {ts_ns}"
+            )
+        return "\n".join(lines)
+
+    async def push_to_influxdb(
+        self,
+        url: str,
+        token: str,
+        org: str,
+        bucket: str,
+        limit: int = 100,
+    ) -> int:
+        """Push recent request telemetry to an InfluxDB v2 `/api/v2/write` endpoint."""
+        import httpx
+
+        payload = self.to_influx_lines(limit=limit)
+        if not payload:
+            return 0
+        write_url = f"{url.rstrip('/')}/api/v2/write"
+        headers = {
+            "Authorization": f"Token {token}",
+            "Content-Type": "text/plain; charset=utf-8",
+        }
+        params = {"org": org, "bucket": bucket, "precision": "ns"}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(write_url, params=params, headers=headers, content=payload)
+            resp.raise_for_status()
+        return len(payload.splitlines())
+
+

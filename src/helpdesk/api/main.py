@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from helpdesk.agent import HelpdeskAgent, build_tool_backend
@@ -133,6 +134,10 @@ def create_app(
     @app.get("/metrics/recent")
     def recent_metrics(limit: int = Query(20, ge=1, le=100)) -> list[dict[str, Any]]:
         return app.state.telemetry.recent(limit=limit)
+
+    @app.get("/metrics/influx", response_class=PlainTextResponse)
+    def influx_metrics(limit: int = Query(100, ge=1, le=1000)) -> PlainTextResponse:
+        return PlainTextResponse(content=app.state.telemetry.to_influx_lines(limit=limit))
 
     @app.get("/conversations/{conversation_id}")
     def get_conversation(conversation_id: str) -> dict[str, Any]:

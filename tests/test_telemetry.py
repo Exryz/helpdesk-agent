@@ -81,3 +81,11 @@ def test_telemetry_summary_and_recent() -> None:
     recent = telemetry.recent(limit=10)
     assert len(recent) == 2
     assert recent[0]["id"] == r2  # sorted desc by ts
+
+    # InfluxDB line protocol export
+    influx = telemetry.to_influx_lines(limit=10)
+    lines = influx.splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("helpdesk_request,status=ok ")
+    assert "prompt_tokens=100i,completion_tokens=20i" in lines[0]
+

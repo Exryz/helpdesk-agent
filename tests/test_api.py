@@ -94,6 +94,10 @@ def test_metrics_endpoints(app_and_client) -> None:
     assert len(recent) >= 1
     assert recent[0]["question"] == "Ping metrics"
 
+    resp_influx = client.get("/metrics/influx")
+    assert resp_influx.status_code == 200
+    assert "helpdesk_request,status=ok" in resp_influx.text
+
 
 def test_mounted_tickets_routes(app_and_client) -> None:
     client, _ = app_and_client
