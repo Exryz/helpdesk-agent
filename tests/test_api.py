@@ -109,3 +109,21 @@ def test_mounted_tickets_routes(app_and_client) -> None:
     ticket = resp_ticket.json()
     assert ticket["key"] == "TCK-1001"
     assert "Outlook" in ticket["title"]
+
+
+def test_persistent_conversation_endpoints(app_and_client) -> None:
+    client, _ = app_and_client
+    resp = client.post("/chat", json={"message": "Persist this question", "conversation_id": "conv_sql"})
+    assert resp.status_code == 200
+
+    hist = client.get("/conversations/conv_sql")
+    assert hist.status_code == 200
+    msgs = hist.json()["messages"]
+    assert len(msgs) == 2
+    assert msgs[0] == {"role": "user", "content": "Persist this question"}
+
+    cleared = client.delete("/conversations/conv_sql")
+    assert cleared.status_code == 200
+    assert cleared.json()["deleted_messages"] == 2
+    assert client.get("/conversations/conv_sql").json()["messages"] == []
+
