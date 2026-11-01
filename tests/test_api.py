@@ -144,3 +144,40 @@ def test_chat_sse_stream_endpoint(app_and_client) -> None:
     assert "KB-004" in body
 
 
+def test_slack_and_teams_webhook_endpoints(app_and_client) -> None:
+    client, _ = app_and_client
+
+    # Slack URL verification challenge
+    chal = client.post(
+        "/webhooks/slack",
+        json={"type": "url_verification", "challenge": "slack_challenge_token"},
+    )
+    assert chal.status_code == 200
+    assert chal.json() == {"challenge": "slack_challenge_token"}
+
+    # Slack message event
+    slack_res = client.post(
+        "/webhooks/slack",
+        json={"text": "How do I reset my password?", "channel_id": "C01ITHELP"},
+    )
+    assert slack_res.status_code == 200
+    slack_data = slack_res.json()
+    assert "First response" in slack_data["text"]
+    assert slack_data["conversation_id"] == "slack:C01ITHELP"
+
+    # Microsoft Teams outgoing webhook with <at> mention tag
+    teams_res = client.post(
+        "/webhooks/teams",
+        json={
+            "text": "<at>Helpdesk</at> Need a follow-up on my VPN issue",
+            "conversation": {"id": "19:meeting_abc"},
+        },
+    )
+    assert teams_res.status_code == 200
+    teams_data = teams_res.json()
+    assert teams_data["type"] == "message"
+    assert "Second response" in teams_data["text"]
+    assert teams_data["conversation_id"] == "teams:19:meeting_abc"
+
+
+

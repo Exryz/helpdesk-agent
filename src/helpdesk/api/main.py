@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from helpdesk.agent import HelpdeskAgent, build_tool_backend
+from helpdesk.api.webhooks import build_webhook_router
 from helpdesk.config import Settings, get_settings
 from helpdesk.llm import LiteLLMClient
 from helpdesk.retrieval import build_retriever
@@ -83,9 +84,10 @@ def create_app(
     app.state.repo = actual_repo
     app.state.conversations = conversations
 
-    # Mount ticket management and HTML portal routers
+    # Mount ticket management, HTML portal, and Slack/Teams webhook routers
     app.include_router(build_router(actual_repo))
     app.include_router(build_portal_router(actual_repo))
+    app.include_router(build_webhook_router(app))
 
     @app.get("/health")
     def health() -> dict[str, str]:

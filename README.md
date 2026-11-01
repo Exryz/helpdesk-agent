@@ -200,7 +200,10 @@ mypy
 - [x] Export SQLite telemetry to InfluxDB + Grafana dashboard
 - [x] Streaming token responses on `/chat` (SSE) and in the Chainlit UI
 - [x] Persistent conversation history in SQLite
-- [ ] Slack / Microsoft Teams webhook adapter
+- [x] Slack / Microsoft Teams webhook adapter
+- [ ] Knowledge Base REST API (/kb) for browsing and searching articles
+- [ ] SLA breach detection and priority escalation alerts
+- [ ] Incremental KB watcher for hot-reloading updated runbooks
 
 ---
 
