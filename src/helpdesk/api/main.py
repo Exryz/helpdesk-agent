@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -9,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from helpdesk.agent import HelpdeskAgent, build_tool_backend
@@ -124,6 +125,47 @@ def create_app(
             conversation_id=cid,
             stats=result.stats,
         )
+
+    @app.post("/chat/stream")
+    async def chat_stream(request: ChatRequest) -> StreamingResponse:
+        current_agent: HelpdeskAgent = app.state.agent
+        cid = request.conversation_id or uuid.uuid4().hex[:12]
+        history_to_use = (
+            list(request.history)
+            if request.history is not None
+            else app.state.telemetry.get_history(cid, limit=20)
+        )
+
+        result = await current_agent.run(
+            question=request.message,
+            history=history_to_use,
+            conversation_id=cid,
+        )
+
+        app.state.telemetry.append_turn(
+            conversation_id=cid,
+            user_message=request.message,
+            assistant_message=result.answer,
+            max_messages=20,
+        )
+        conversations[cid] = app.state.telemetry.get_history(cid, limit=20)
+
+        async def event_generator() -> AsyncIterator[str]:
+            for tc in result.tool_calls:
+                yield f"event: tool_call\ndata: {json.dumps(tc)}\n\n"
+            words = result.answer.split(" ")
+            for i, word in enumerate(words):
+                piece = word if i == 0 else f" {word}"
+                yield f"event: token\ndata: {json.dumps({'token': piece})}\n\n"
+            done_payload = {
+                "conversation_id": cid,
+                "sources": result.sources,
+                "tools_used": result.tools_used,
+                "stats": result.stats,
+            }
+            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.get("/metrics")
     def metrics(

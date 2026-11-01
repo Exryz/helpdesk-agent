@@ -79,4 +79,7 @@ async def on_message(message: cl.Message) -> None:
         history = history[-20:]
     cl.user_session.set("history", history)
 
-    await cl.Message(content=result.answer + footer, elements=elements).send()
+    out_msg = cl.Message(content="", elements=elements)
+    for i, word in enumerate((result.answer + footer).split(" ")):
+        await out_msg.stream_token(word if i == 0 else f" {word}")
+    await out_msg.send()

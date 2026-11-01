@@ -131,3 +131,16 @@ def test_persistent_conversation_endpoints(app_and_client) -> None:
     assert cleared.json()["deleted_messages"] == 2
     assert client.get("/conversations/conv_sql").json()["messages"] == []
 
+
+def test_chat_sse_stream_endpoint(app_and_client) -> None:
+    client, _ = app_and_client
+    with client.stream("POST", "/chat/stream", json={"message": "How do I reset my password?"}) as resp:
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("content-type", "")
+        body = "".join(resp.iter_text())
+
+    assert "event: token" in body
+    assert "event: done" in body
+    assert "KB-004" in body
+
+
