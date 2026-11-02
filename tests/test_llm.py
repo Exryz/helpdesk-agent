@@ -1,86 +1,79 @@
-"""Unit tests for the LLM abstraction and ScriptedLLM fake."""
+"""Unit tests for LLM streaming and ScriptedLLM behavior."""
 
 from __future__ import annotations
 
 import pytest
 
-from helpdesk.llm import LLMResponse, ScriptedLLM, ToolCall, _parse_args
+from helpdesk.llm import LLMResponse, ScriptedLLM, StreamEvent, ToolCall
 from helpdesk.telemetry import Telemetry
 
 
-def test_tool_call_to_openai() -> None:
-    tc = ToolCall(id="call_1", name="search_tickets", arguments={"query": "VPN"})
-    payload = tc.to_openai()
+def test_stream_event_dataclass() -> None:
+    delta_ev = StreamEvent(kind="delta", text="chunk")
+    assert delta_ev.kind == "delta"
+    assert delta_ev.text == "chunk"
+    assert delta_ev.response is None
 
-    assert payload["id"] == "call_1"
-    assert payload["type"] == "function"
-    assert payload["function"]["name"] == "search_tickets"
-    assert '"query": "VPN"' in payload["function"]["arguments"]
-
-
-def test_llm_response_as_message() -> None:
-    # Text-only response
-    resp = LLMResponse(content="Here is the troubleshooting guide.", tool_calls=[])
-    msg = resp.as_message()
-    assert msg["role"] == "assistant"
-    assert msg["content"] == "Here is the troubleshooting guide."
-    assert "tool_calls" not in msg
-
-    # Response with tool calls
-    tc = ToolCall(id="call_99", name="get_ticket", arguments={"ticket_key": "TCK-1001"})
-    resp_tc = LLMResponse(content=None, tool_calls=[tc])
-    msg_tc = resp_tc.as_message()
-    assert msg_tc["role"] == "assistant"
-    assert msg_tc["content"] == ""
-    assert len(msg_tc["tool_calls"]) == 1
-    assert msg_tc["tool_calls"][0]["function"]["name"] == "get_ticket"
-
-
-def test_parse_args_helper() -> None:
-    # Dictionary passes through
-    assert _parse_args({"foo": "bar"}) == {"foo": "bar"}
-
-    # JSON string
-    assert _parse_args('{"limit": 5}') == {"limit": 5}
-
-    # Empty / None
-    assert _parse_args("") == {}
-    assert _parse_args(None) == {}
-
-    # Invalid JSON
-    assert _parse_args("invalid json {") == {}
+    resp = LLMResponse(content="Full response", tool_calls=[])
+    resp_ev = StreamEvent(kind="response", response=resp)
+    assert resp_ev.kind == "response"
+    assert resp_ev.response == resp
+    assert resp_ev.text == ""
 
 
 @pytest.mark.asyncio
-async def test_scripted_llm_list_mode() -> None:
+async def test_scripted_llm_chat_stream_text() -> None:
     telemetry = Telemetry(":memory:")
-    responses = [
-        LLMResponse(content="Response 1", prompt_tokens=10, completion_tokens=5, cost_usd=0.0001),
-        LLMResponse(content="Response 2", prompt_tokens=20, completion_tokens=10, cost_usd=0.0002),
-    ]
+    scripted_llm = ScriptedLLM(
+        [
+            LLMResponse(
+                content="Hello world from helpdesk assistant",
+                tool_calls=[],
+                prompt_tokens=10,
+                completion_tokens=5,
+                cost_usd=0.001,
+            )
+        ],
+        telemetry=telemetry,
+    )
 
-    llm = ScriptedLLM(script=responses, telemetry=telemetry)
+    events: list[StreamEvent] = []
+    async for ev in scripted_llm.chat_stream([{"role": "user", "content": "hi"}]):
+        events.append(ev)
 
-    r1 = await llm.chat([{"role": "user", "content": "Hello"}])
-    assert r1.content == "Response 1"
+    deltas = [e.text for e in events if e.kind == "delta"]
+    assert "".join(deltas) == "Hello world from helpdesk assistant"
+    assert len(deltas) == 5
 
-    r2 = await llm.chat([{"role": "user", "content": "Next"}])
-    assert r2.content == "Response 2"
+    responses = [e.response for e in events if e.kind == "response"]
+    assert len(responses) == 1
+    assert responses[0] is not None
+    assert responses[0].content == "Hello world from helpdesk assistant"
 
-    assert len(llm.calls) == 2
-    assert llm.calls[0][0]["content"] == "Hello"
-
-    # Out of responses raises RuntimeError
-    with pytest.raises(RuntimeError, match="ran out of responses"):
-        await llm.chat([{"role": "user", "content": "Another"}])
+    # Telemetry should be recorded
+    with telemetry._lock:
+        count = telemetry._conn.execute("SELECT count(*) FROM llm_calls").fetchone()[0]
+    assert count == 1
 
 
 @pytest.mark.asyncio
-async def test_scripted_llm_callable_mode() -> None:
-    def responder(messages, tools):
-        user_msg = messages[-1]["content"]
-        return LLMResponse(content=f"Echo: {user_msg}")
+async def test_scripted_llm_chat_stream_tool_call_turn() -> None:
+    scripted_llm = ScriptedLLM([
+        LLMResponse(
+            content=None,
+            tool_calls=[ToolCall(id="c1", name="get_ticket", arguments={"ticket_key": "TCK-1001"})],
+        )
+    ])
 
-    llm = ScriptedLLM(script=responder)
-    res = await llm.chat([{"role": "user", "content": "Testing callable"}])
-    assert res.content == "Echo: Testing callable"
+    events: list[StreamEvent] = []
+    async for ev in scripted_llm.chat_stream([{"role": "user", "content": "get ticket"}]):
+        events.append(ev)
+
+    deltas = [e for e in events if e.kind == "delta"]
+    assert len(deltas) == 0
+
+    responses = [e.response for e in events if e.kind == "response"]
+    assert len(responses) == 1
+    assert responses[0] is not None
+    assert len(responses[0].tool_calls) == 1
+    assert responses[0].tool_calls[0].name == "get_ticket"

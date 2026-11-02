@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from helpdesk.config import get_settings
 from helpdesk.telemetry import Telemetry
@@ -46,6 +46,13 @@ class LLMResponse:
         return msg
 
 
+@dataclass
+class StreamEvent:
+    kind: Literal["delta", "response"]
+    text: str = ""
+    response: LLMResponse | None = None
+
+
 class LLMClient(Protocol):
     async def chat(
         self,
@@ -54,6 +61,13 @@ class LLMClient(Protocol):
         temperature: float | None = None,
         json_mode: bool = False,
     ) -> LLMResponse: ...
+
+    def chat_stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[StreamEvent]: ...
 
 
 def _parse_args(raw: Any) -> dict[str, Any]:
@@ -130,8 +144,11 @@ class LiteLLMClient:
 
         choice = resp.choices[0].message
         tool_calls = [
-            ToolCall(id=tc.id or f"call_{i}", name=tc.function.name,
-                     arguments=_parse_args(tc.function.arguments))
+            ToolCall(
+                id=tc.id or f"call_{i}",
+                name=tc.function.name,
+                arguments=_parse_args(tc.function.arguments),
+            )
             for i, tc in enumerate(getattr(choice, "tool_calls", None) or [])
         ]
         usage = getattr(resp, "usage", None)
@@ -155,6 +172,82 @@ class LiteLLMClient:
             cost_usd=cost,
             latency_ms=latency_ms,
         )
+
+    async def chat_stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        import litellm
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": list(messages),
+            "temperature": self.temperature if temperature is None else temperature,
+            "timeout": self.timeout_s,
+            "num_retries": 2,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+
+        await _throttle(self.model, get_settings().llm_min_interval_s)
+        start = time.perf_counter()
+        chunks: list[Any] = []
+        try:
+            response_stream = await litellm.acompletion(**kwargs)
+            async for chunk in response_stream:
+                chunks.append(chunk)
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    content = getattr(delta, "content", None)
+                    if content:
+                        yield StreamEvent(kind="delta", text=content)
+        except Exception as e:
+            if self.telemetry:
+                latency = (time.perf_counter() - start) * 1000
+                self.telemetry.record_llm_call(self.model, 0, 0, 0.0, latency, error=repr(e))
+            raise
+        latency_ms = (time.perf_counter() - start) * 1000
+
+        rebuilt: Any = litellm.stream_chunk_builder(chunks, messages=list(messages))
+        choices = getattr(rebuilt, "choices", None) or []
+        first_choice = choices[0] if choices else None
+        choice_msg = getattr(first_choice, "message", None)
+        content = getattr(choice_msg, "content", None)
+        tool_calls = [
+            ToolCall(
+                id=tc.id or f"call_{i}",
+                name=tc.function.name,
+                arguments=_parse_args(tc.function.arguments),
+            )
+            for i, tc in enumerate(getattr(choice_msg, "tool_calls", None) or [])
+        ]
+        usage = getattr(rebuilt, "usage", None)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        try:
+            cost = float(litellm.completion_cost(completion_response=rebuilt) or 0.0)
+        except Exception:
+            cost = 0.0
+
+        if self.telemetry:
+            self.telemetry.record_llm_call(
+                self.model, prompt_tokens, completion_tokens, cost, latency_ms
+            )
+
+        resp = LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            model=self.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost,
+            latency_ms=latency_ms,
+        )
+        yield StreamEvent(kind="response", response=resp)
 
 
 Responder = Callable[[Sequence[Message], Sequence[dict[str, Any]] | None], LLMResponse]
@@ -193,3 +286,17 @@ class ScriptedLLM:
                 "scripted", resp.prompt_tokens, resp.completion_tokens, resp.cost_usd, 1.0
             )
         return resp
+
+    async def chat_stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[dict[str, Any]] | None = None,
+        temperature: float | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        resp = await self.chat(messages, tools=tools, temperature=temperature)
+        if resp.content:
+            words = resp.content.split(" ")
+            for i, word in enumerate(words):
+                piece = word if i == 0 else f" {word}"
+                yield StreamEvent(kind="delta", text=piece)
+        yield StreamEvent(kind="response", response=resp)

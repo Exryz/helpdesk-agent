@@ -19,6 +19,17 @@ class AgentResult:
     stats: dict[str, Any] = field(default_factory=dict)
     steps: int = 0
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "answer": self.answer,
+            "sources": self.sources,
+            "tools_used": self.tools_used,
+            "tool_calls": self.tool_calls,
+            "retrieved_doc_ids": self.retrieved_doc_ids,
+            "stats": self.stats,
+            "steps": self.steps,
+        }
+
 
 class AgentState(TypedDict, total=False):
     question: str
