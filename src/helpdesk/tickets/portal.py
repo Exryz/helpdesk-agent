@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import html
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from helpdesk.tickets.repository import (
     Priority,
@@ -70,7 +70,7 @@ def build_portal_router(repo: TicketRepository) -> APIRouter:
 <body>
   <main>
     <h1>Submit a Support Ticket</h1>
-    <form id="ticket-form" action="/tickets" method="post">
+    <form id="ticket-form" action="/portal/new" method="post">
       <label for="title">Title</label>
       <input id="title" name="title" type="text" required />
       <label for="requester">Requester</label>
@@ -87,5 +87,22 @@ def build_portal_router(repo: TicketRepository) -> APIRouter:
 </body>
 </html>"""
         return HTMLResponse(content=body)
+
+    @router.post("/new", response_class=RedirectResponse)
+    def portal_create_ticket(
+        title: str = Form(...),
+        requester: str = Form(...),
+        priority: str = Form("medium"),
+        category: str = Form("General"),
+        description: str = Form(""),
+    ) -> RedirectResponse:
+        t = repo.create(
+            title=title,
+            description=description,
+            requester=requester,
+            priority=priority,
+            category=category,
+        )
+        return RedirectResponse(url=f"/portal/tickets/{t.key}", status_code=303)
 
     return router

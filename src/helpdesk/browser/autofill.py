@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -48,9 +49,23 @@ class AutofillResult:
     submitted: bool
     fields: dict[str, str]
     screenshot_path: str | None = None
+    created_ticket_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def resolve_autofill_url(url: str) -> str:
+    """Resolve a relative URL (e.g. '/portal/new') against portal_base_url."""
+    cleaned = url.strip()
+    if cleaned.startswith(("http://", "https://")):
+        return cleaned
+    from helpdesk.config import get_settings
+
+    base = get_settings().portal_base_url.rstrip("/")
+    if cleaned.startswith("/"):
+        return f"{base}{cleaned}"
+    return cleaned
 
 
 def build_autofill_plan(draft: TicketFormDraft) -> list[dict[str, str]]:
@@ -75,15 +90,17 @@ async def autofill_ticket_form(
     """Open a ticket form page in headless Chromium, populate fields, and optionally submit."""
     from playwright.async_api import async_playwright
 
+    target_url = resolve_autofill_url(url)
     clean = draft.validated()
     plan = build_autofill_plan(clean)
     saved_screenshot: str | None = None
+    created_ticket_key: str | None = None
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         try:
             page = await browser.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
             await page.wait_for_selector("#ticket-form", timeout=timeout_ms)
 
             for step in plan:
@@ -99,7 +116,21 @@ async def autofill_ticket_form(
                 saved_screenshot = str(target)
 
             if submit:
-                await page.click("#submit-ticket")
+                async with page.expect_navigation(url=re.compile(r"/portal/tickets/"), timeout=timeout_ms):
+                    await page.click("#submit-ticket")
+                try:
+                    await page.wait_for_selector("#ticket-key", timeout=timeout_ms)
+                    el = await page.query_selector("#ticket-key")
+                    if el:
+                        text = await el.text_content()
+                        if text:
+                            created_ticket_key = text.strip()
+                except Exception:
+                    pass
+                if not created_ticket_key:
+                    m = re.search(r"/portal/tickets/([^/?#]+)", page.url)
+                    if m:
+                        created_ticket_key = m.group(1)
         finally:
             await browser.close()
 
@@ -108,6 +139,7 @@ async def autofill_ticket_form(
         submitted=submit,
         fields=clean.to_dict(),
         screenshot_path=saved_screenshot,
+        created_ticket_key=created_ticket_key,
     )
 
 

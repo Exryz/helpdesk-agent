@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     max_agent_steps: int = 6
     tool_backend: str = "mcp"  # "mcp" (spawn MCP server over stdio) or "local" (in-process)
 
+    # --- Integrations (leave empty to disable signature checks in local development) ---
+    slack_signing_secret: str | None = None
+    teams_webhook_secret: str | None = None  # base64 security token from the Teams outgoing webhook
+    portal_base_url: str = "http://localhost:8000"  # where /portal pages are served
+
+    # --- Operations ---
+    kb_watch_interval_s: float = 0.0  # >0 enables polling data/kb for changes and hot-reloading
+    sla_hours_critical: float = 4.0
+    sla_hours_high: float = 8.0
+    sla_hours_medium: float = 24.0
+    sla_hours_low: float = 72.0
+
     @property
     def resolved_judge_model(self) -> str:
         return self.judge_model or self.llm_model

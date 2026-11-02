@@ -42,6 +42,9 @@ packages = ["src/helpdesk"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 pythonpath = ["src", "."]
+markers = [
+    "browser: marks tests as requiring real browser automation via Playwright",
+]
 
 [tool.ruff]
 line-length = 110

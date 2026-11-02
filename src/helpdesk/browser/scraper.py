@@ -88,15 +88,29 @@ def parse_ticket_html(raw_html: str) -> ScrapedTicket:
     )
 
 
+def resolve_scrape_url(url: str) -> str:
+    """Resolve a portal ticket URL, relative path, or bare ticket key against portal_base_url."""
+    cleaned = url.strip()
+    if cleaned.startswith(("http://", "https://")):
+        return cleaned
+    from helpdesk.config import get_settings
+
+    base = get_settings().portal_base_url.rstrip("/")
+    if cleaned.startswith("/"):
+        return f"{base}{cleaned}"
+    return f"{base}/portal/tickets/{cleaned}"
+
+
 async def scrape_ticket_page(url: str, timeout_ms: int = 15000) -> ScrapedTicket:
     """Navigate to `url` with headless Chromium via Playwright and extract ticket details."""
     from playwright.async_api import async_playwright
 
+    target_url = resolve_scrape_url(url)
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         try:
             page = await browser.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
             await page.wait_for_selector("#ticket-detail", timeout=timeout_ms)
             html_content = await page.content()
         finally:

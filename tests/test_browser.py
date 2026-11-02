@@ -14,8 +14,9 @@ from helpdesk.browser.autofill import (
     TicketFormDraft,
     build_autofill_plan,
     extract_screenshot_paths,
+    resolve_autofill_url,
 )
-from helpdesk.browser.scraper import parse_ticket_html
+from helpdesk.browser.scraper import parse_ticket_html, resolve_scrape_url
 from helpdesk.llm import LLMResponse, ScriptedLLM, ToolCall
 from helpdesk.retrieval.hybrid import HybridRetriever
 from helpdesk.tickets.api import create_app
@@ -205,6 +206,61 @@ def test_extract_screenshot_paths_filters_existing_files(tmp_path: Path) -> None
         {"name": "autofill_ticket_form", "result": {"screenshot_path": str(tmp_path / "missing.png")}},
     ]
     assert extract_screenshot_paths(tool_calls) == [str(shot)]
+
+
+def test_portal_post_new_ticket_redirects_to_detail() -> None:
+    repo = TicketRepository.from_path(":memory:", seed=True)
+    client = TestClient(create_app(repo), follow_redirects=False)
+
+    resp = client.post(
+        "/portal/new",
+        data={
+            "title": "Cannot access Jira",
+            "requester": "john.reyes",
+            "priority": "high",
+            "category": "Accounts & Access",
+            "description": "Getting 403 Forbidden on login.",
+        },
+    )
+    assert resp.status_code == 303
+    loc = resp.headers["location"]
+    assert loc.startswith("/portal/tickets/TCK-")
+
+    detail_resp = client.get(loc)
+    assert detail_resp.status_code == 200
+    assert "Cannot access Jira" in detail_resp.text
+    assert "john.reyes" in detail_resp.text
+
+
+def test_resolve_scrape_and_autofill_urls() -> None:
+    # Bare ticket key
+    assert resolve_scrape_url("TCK-1003").endswith("/portal/tickets/TCK-1003")
+    # Relative path
+    assert resolve_scrape_url("/portal/tickets/TCK-1003").endswith("/portal/tickets/TCK-1003")
+    # Full URL
+    assert resolve_scrape_url("http://example.com/tickets/1") == "http://example.com/tickets/1"
+
+    # Autofill URL relative
+    assert resolve_autofill_url("/portal/new").endswith("/portal/new")
+    # Autofill URL full
+    assert resolve_autofill_url("http://example.com/form") == "http://example.com/form"
+
+
+def test_browser_tools_return_error_for_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = TicketRepository.from_path(":memory:", seed=True)
+    tools = TicketTools(repo)
+
+    import helpdesk.tickets.tools as tools_mod
+
+    def mock_scrape(*args: object, **kwargs: object) -> object:
+        raise ImportError("No module named 'playwright'")
+
+    monkeypatch.setattr(tools_mod, "run_scrape_ticket_page", mock_scrape)
+    res = tools.scrape_ticket_page(url="http://example.com")
+    assert "error" in res
+    assert "pip install -e .[browser]" in res["error"]
+    assert "playwright install chromium" in res["error"]
+
 
 
 
