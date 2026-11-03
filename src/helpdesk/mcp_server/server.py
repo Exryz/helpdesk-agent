@@ -91,6 +91,11 @@ def build_server(tools: TicketTools) -> FastMCP:
             screenshot_path=screenshot_path,
         )
 
+    @mcp.tool()
+    def check_sla_breaches() -> dict[str, Any]:
+        """List active tickets that have breached their priority SLA window."""
+        return tools.check_sla_breaches()
+
     return mcp
 
 

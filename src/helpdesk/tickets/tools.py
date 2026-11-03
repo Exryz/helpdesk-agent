@@ -7,7 +7,8 @@ instead of raised, so the LLM can read the problem and recover.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import concurrent.futures
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from helpdesk.browser.autofill import (
@@ -31,9 +32,23 @@ from helpdesk.tickets.repository import (
     comment_to_dict,
     ticket_to_dict,
 )
+from helpdesk.tickets.sla import check_sla_breaches_tool
 
 STATUSES = [s.value for s in Status]
 PRIORITIES = [p.value for p in Priority]
+
+
+def _run_coro(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run a coroutine to completion, running in a worker thread if an event loop is already active."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 class TicketTools:
@@ -47,6 +62,23 @@ class TicketTools:
             return {"error": str(e)}
         except ValueError as e:
             return {"error": f"Invalid input: {e}"}
+
+    def _safe_browser(self, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return fn()
+        except ImportError as e:
+            return {
+                "error": (
+                    f"Playwright is not installed ({e}). Please run "
+                    "`pip install -e .[browser]` and `playwright install chromium`."
+                )
+            }
+        except TicketNotFound as e:
+            return {"error": str(e)}
+        except ValueError as e:
+            return {"error": f"Invalid input: {e}"}
+        except Exception as e:
+            return {"error": f"Browser automation error: {e}"}
 
     def search_tickets(
         self,
@@ -120,9 +152,9 @@ class TicketTools:
                 return parse_ticket_html(html).to_dict()
             if not url:
                 raise ValueError("Provide either 'url' or 'html' to scrape_ticket_page")
-            return asyncio.run(run_scrape_ticket_page(url)).to_dict()
+            return _run_coro(run_scrape_ticket_page(url)).to_dict()
 
-        return self._safe(run)
+        return self._safe_browser(run)
 
     def autofill_ticket_form(
         self,
@@ -152,8 +184,9 @@ class TicketTools:
                     "submitted": False,
                     "fields": draft.to_dict(),
                     "plan": plan,
+                    "created_ticket_key": None,
                 }
-            res = asyncio.run(
+            res = _run_coro(
                 run_autofill_ticket_form(
                     url=url,
                     draft=draft,
@@ -163,7 +196,11 @@ class TicketTools:
             )
             return {**res.to_dict(), "plan": plan}
 
-        return self._safe(run)
+        return self._safe_browser(run)
+
+    def check_sla_breaches(self) -> dict[str, Any]:
+        """List active tickets that have breached their priority SLA window."""
+        return self._safe(lambda: check_sla_breaches_tool(self.repo))
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         fn = getattr(self, name, None)
@@ -270,6 +307,14 @@ TICKET_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "screenshot_path": {"type": "string"},
             },
             "required": ["title", "requester"],
+        },
+    },
+    {
+        "name": "check_sla_breaches",
+        "description": "Check for active (open/in_progress) tickets that have breached their SLA window.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
         },
     },
 ]
