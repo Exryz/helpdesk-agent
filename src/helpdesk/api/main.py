@@ -1,12 +1,13 @@
-"""FastAPI application exposing /chat, /metrics, /health, and ticket management."""
+"""FastAPI application exposing /chat, /kb, /sla, /metrics, /health, and ticket management."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import FastAPI, Query
@@ -14,14 +15,17 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from helpdesk.agent import HelpdeskAgent, build_tool_backend
+from helpdesk.api.kb import build_kb_router
 from helpdesk.api.webhooks import build_webhook_router
 from helpdesk.config import Settings, get_settings
 from helpdesk.llm import LiteLLMClient
 from helpdesk.retrieval import build_retriever
+from helpdesk.retrieval.watcher import watch_kb
 from helpdesk.telemetry import Telemetry
 from helpdesk.tickets.api import build_router
 from helpdesk.tickets.portal import build_portal_router
 from helpdesk.tickets.repository import TicketRepository
+from helpdesk.tickets.sla import build_sla_router
 
 
 class ChatRequest(BaseModel):
@@ -71,21 +75,36 @@ def create_app(
             app.state.agent = agent
             app.state.tool_backend = getattr(agent, "tools", None)
 
+        watcher_stop = asyncio.Event()
+        watcher_task: asyncio.Task[None] | None = None
+        if s.kb_watch_interval_s > 0:
+            watcher_task = asyncio.create_task(
+                watch_kb(app.state.agent, s, s.kb_watch_interval_s, watcher_stop)
+            )
+
         yield
 
         # Shutdown cleanup
+        if watcher_task is not None:
+            watcher_stop.set()
+            watcher_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher_task
         backend_to_close = getattr(app.state, "tool_backend", None)
         if backend_to_close and hasattr(backend_to_close, "aclose"):
             await backend_to_close.aclose()
 
     app = FastAPI(title="Northwind Labs IT Helpdesk API", version="0.1.0", lifespan=lifespan)
+    app.state.settings = s
     app.state.agent = agent
     app.state.telemetry = actual_telemetry
     app.state.repo = actual_repo
     app.state.conversations = conversations
 
-    # Mount ticket management, HTML portal, and Slack/Teams webhook routers
+    # Mount ticket management, SLA, KB, HTML portal, and Slack/Teams webhook routers
     app.include_router(build_router(actual_repo))
+    app.include_router(build_sla_router(actual_repo, s))
+    app.include_router(build_kb_router(app))
     app.include_router(build_portal_router(actual_repo))
     app.include_router(build_webhook_router(app))
 
@@ -138,34 +157,39 @@ def create_app(
             else app.state.telemetry.get_history(cid, limit=20)
         )
 
-        result = await current_agent.run(
-            question=request.message,
-            history=history_to_use,
-            conversation_id=cid,
-        )
-
-        app.state.telemetry.append_turn(
-            conversation_id=cid,
-            user_message=request.message,
-            assistant_message=result.answer,
-            max_messages=20,
-        )
-        conversations[cid] = app.state.telemetry.get_history(cid, limit=20)
-
         async def event_generator() -> AsyncIterator[str]:
-            for tc in result.tool_calls:
-                yield f"event: tool_call\ndata: {json.dumps(tc)}\n\n"
-            words = result.answer.split(" ")
-            for i, word in enumerate(words):
-                piece = word if i == 0 else f" {word}"
-                yield f"event: token\ndata: {json.dumps({'token': piece})}\n\n"
-            done_payload = {
-                "conversation_id": cid,
-                "sources": result.sources,
-                "tools_used": result.tools_used,
-                "stats": result.stats,
-            }
-            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+            final_answer = ""
+            async for ev in current_agent.astream(
+                question=request.message,
+                history=history_to_use,
+                conversation_id=cid,
+            ):
+                ev_type = ev.get("type")
+                if ev_type == "retrieval":
+                    yield f"event: retrieval\ndata: {json.dumps({'doc_ids': ev.get('doc_ids', [])})}\n\n"
+                elif ev_type == "tool_call":
+                    payload = {"name": ev.get("name"), "arguments": ev.get("arguments", {})}
+                    yield f"event: tool_call\ndata: {json.dumps(payload)}\n\n"
+                elif ev_type == "tool_result":
+                    payload = {"name": ev.get("name"), "result": ev.get("result", {})}
+                    yield f"event: tool_result\ndata: {json.dumps(payload)}\n\n"
+                elif ev_type == "token":
+                    piece = ev.get("text", "")
+                    yield f"event: token\ndata: {json.dumps({'token': piece, 'text': piece})}\n\n"
+                elif ev_type == "done":
+                    result_dict = ev.get("result", {})
+                    final_answer = result_dict.get("answer", "")
+                    done_payload = dict(result_dict)
+                    done_payload["conversation_id"] = cid
+                    yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+
+            app.state.telemetry.append_turn(
+                conversation_id=cid,
+                user_message=request.message,
+                assistant_message=final_answer,
+                max_messages=20,
+            )
+            conversations[cid] = app.state.telemetry.get_history(cid, limit=20)
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 

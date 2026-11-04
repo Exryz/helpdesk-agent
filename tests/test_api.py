@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any, cast
+
 import pytest
 from fastapi.testclient import TestClient
 
 from helpdesk.agent.graph import HelpdeskAgent
 from helpdesk.agent.tool_backend import LocalToolBackend
 from helpdesk.api.main import create_app
-from helpdesk.llm import LLMResponse, ScriptedLLM
+from helpdesk.llm import LLMClient, LLMResponse, ScriptedLLM, ToolCall
 from helpdesk.retrieval.hybrid import HybridRetriever
 from helpdesk.telemetry import Telemetry
 from helpdesk.tickets.repository import TicketRepository
@@ -139,9 +142,81 @@ def test_chat_sse_stream_endpoint(app_and_client) -> None:
         assert "text/event-stream" in resp.headers.get("content-type", "")
         body = "".join(resp.iter_text())
 
+    assert "event: retrieval" in body
     assert "event: token" in body
     assert "event: done" in body
     assert "KB-004" in body
+
+
+def test_chat_stream_tool_call_flow(
+    fake_retriever: HybridRetriever, repo: TicketRepository, local_tools: TicketTools
+) -> None:
+    telemetry = Telemetry(":memory:")
+    backend = LocalToolBackend(local_tools)
+    scripted_llm = ScriptedLLM(
+        [
+            LLMResponse(
+                content=None,
+                tool_calls=[ToolCall(id="c1", name="get_ticket", arguments={"ticket_key": "TCK-1001"})],
+            ),
+            LLMResponse(content="Ticket TCK-1001 is open for Outlook issue.", tool_calls=[]),
+        ],
+        telemetry=telemetry,
+    )
+    agent = HelpdeskAgent(scripted_llm, fake_retriever, backend, telemetry=telemetry)
+    app = create_app(agent=agent, telemetry=telemetry, repo=repo)
+
+    with (
+        TestClient(app) as client,
+        client.stream("POST", "/chat/stream", json={"message": "Status of TCK-1001"}) as resp,
+    ):
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("content-type", "")
+        body = "".join(resp.iter_text())
+
+    assert "event: retrieval" in body
+    assert "event: tool_call" in body
+    assert "get_ticket" in body
+    assert "event: tool_result" in body
+    assert "event: token" in body
+    assert "event: done" in body
+    assert "Outlook issue" in body
+
+
+def test_chat_stream_fallback_when_llm_lacks_chat_stream(
+    fake_retriever: HybridRetriever, repo: TicketRepository, local_tools: TicketTools
+) -> None:
+    telemetry = Telemetry(":memory:")
+    backend = LocalToolBackend(local_tools)
+
+    class NonStreamingLLM:
+        async def chat(
+            self,
+            messages: Sequence[dict[str, Any]],
+            tools: Sequence[dict[str, Any]] | None = None,
+            temperature: float | None = None,
+            json_mode: bool = False,
+        ) -> LLMResponse:
+            return LLMResponse(content="Direct fallback answer.", tool_calls=[])
+
+    raw_llm = NonStreamingLLM()
+    assert not hasattr(raw_llm, "chat_stream")
+    agent = HelpdeskAgent(cast(LLMClient, raw_llm), fake_retriever, backend, telemetry=telemetry)
+    app = create_app(agent=agent, telemetry=telemetry, repo=repo)
+
+    with (
+        TestClient(app) as client,
+        client.stream("POST", "/chat/stream", json={"message": "Help me"}) as resp,
+    ):
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("content-type", "")
+        body = "".join(resp.iter_text())
+
+    assert "event: retrieval" in body
+    assert "event: token" in body
+    assert "event: done" in body
+    assert "Direct fallback answer" in body
+
 
 
 def test_slack_and_teams_webhook_endpoints(app_and_client) -> None:

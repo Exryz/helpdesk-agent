@@ -15,8 +15,8 @@ An IT helpdesk agent that answers support questions from a Markdown knowledge ba
 
 1. **Hybrid Retrieval + Reranking:** Combines lexical BM25 (`rank-bm25`) and local dense embeddings (`fastembed` with `BAAI/bge-small-en-v1.5` stored in Qdrant), merges rankings with Reciprocal Rank Fusion (RRF), and re-scores candidates with a local cross-encoder (`Xenova/ms-marco-MiniLM-L-6-v2`).
 2. **Grounded Answers & Confirmation before Mutations:** Answers cite the specific KB articles used. When the knowledge base cannot resolve an issue, the agent offers to open a support ticket and waits for user confirmation before calling `create_ticket`.
-3. **MCP Tool Server:** Ticket operations (`search_tickets`, `get_ticket`, `create_ticket`, `add_comment`, `update_ticket_status`) are exposed both in-process and over `stdio` via the `mcp` SDK.
-4. **Telemetry:** Tracks prompt/completion tokens, latency (`avg`, `p50`, `p95`), estimated cost, retrieved sources, and tool usage in SQLite, exposed at `GET /metrics`.
+3. **MCP Tool Server & Browser Automation:** Ticket operations (`search_tickets`, `get_ticket`, `create_ticket`, `add_comment`, `update_ticket_status`, `check_sla_breaches`, `scrape_ticket_page`, `autofill_ticket_form`) are exposed both in-process and over `stdio` via the `mcp` SDK, with Playwright support for legacy portal scraping and ticket form autofill + screenshot preview.
+4. **Telemetry, Streaming & Integrations:** Tracks prompt/completion tokens, latency (`avg`, `p50`, `p95`), estimated cost, retrieved sources, and tool usage in SQLite (`GET /metrics` and InfluxDB line protocol `GET /metrics/influx`), streams progressive SSE events on `POST /chat/stream`, and provides HMAC-verified Slack (`/webhooks/slack`) and Microsoft Teams (`/webhooks/teams`) adapters.
 
 ```mermaid
 flowchart LR
@@ -42,9 +42,10 @@ flowchart LR
 | LLM Client | LiteLLM | Works with Gemini, OpenAI, Azure OpenAI, or local Ollama |
 | Tool Protocol | MCP (`mcp` SDK) | `stdio` server + in-process fallback |
 | Retrieval | `rank-bm25` + `fastembed` + `qdrant-client` | Runs locally on CPU; embedded Qdrant by default |
-| Ticketing | FastAPI + SQLModel + SQLite | Seeded with 10 sample IT tickets |
-| Chat UI | Chainlit | Displays tool calls, cited sources, and request stats |
-| Testing | `pytest` + `pytest-asyncio` | Deterministic fake LLM (`ScriptedLLM`) and hashing embedder for offline CI |
+| Ticketing | FastAPI + SQLModel + SQLite | Seeded with 10 sample IT tickets, SLA tracking, and HTML portal |
+| Browser Automation | Playwright (Chromium) | Legacy portal scraping + ticket form autofill & screenshot preview |
+| Chat UI | Chainlit | Displays progressive token stream, tool calls, cited sources, and screenshot previews |
+| Testing | `pytest` + `pytest-asyncio` | Deterministic fake LLM (`ScriptedLLM`), hashing embedder, and headless Chromium e2e tests |
 
 ---
 
@@ -62,7 +63,8 @@ python -m venv .venv
 # Linux / macOS
 source .venv/bin/activate
 
-pip install -e .[dev,ui]
+pip install -e .[dev,ui,browser]
+playwright install chromium
 ```
 
 ### 2. Configure `.env`
@@ -102,11 +104,13 @@ chainlit run src/helpdesk/ui/app.py --port 8080
 
 - **Chat UI:** `http://localhost:8080`
 - **OpenAPI docs:** `http://localhost:8000/docs`
-- **Telemetry summary:** `http://localhost:8000/metrics`
+- **Knowledge Base API:** `http://localhost:8000/kb` & `http://localhost:8000/kb/search?q=VPN`
+- **SLA Breaches:** `http://localhost:8000/sla/breaches`
+- **Telemetry summary:** `http://localhost:8000/metrics` (`http://localhost:8000/metrics/influx` for InfluxDB/Grafana)
 
 ### 5. MCP Server Configuration
 
-To expose the ticket tools (`search_tickets`, `get_ticket`, `create_ticket`, `add_comment`, `update_ticket_status`) to any MCP client over `stdio`:
+To expose the ticket tools (`search_tickets`, `get_ticket`, `create_ticket`, `add_comment`, `update_ticket_status`, `check_sla_breaches`, `scrape_ticket_page`, `autofill_ticket_form`) to any MCP client over `stdio`:
 
 ```json
 {
@@ -148,8 +152,8 @@ python -m evals.run_evals --mode retrieval
 # Fast offline smoke run (hashing embedder, used in CI)
 python -m evals.run_evals --mode retrieval --offline --limit 10
 
-# End-to-end agent + LLM-as-judge evaluation
-python -m evals.run_evals --mode agent
+# End-to-end agent + LLM-as-judge evaluation (resumable across rate-limit windows)
+python -m evals.run_evals --mode agent --resume evals/results/agent_cache.jsonl
 ```
 
 ---
@@ -158,28 +162,29 @@ python -m evals.run_evals --mode agent
 
 ```text
 helpdesk-agent/
-├── .github/workflows/ci.yml   # Lint, type-check, unit tests, offline eval smoke test
+├── .github/workflows/ci.yml   # Lint, type-check, unit + Playwright tests, Docker build
 ├── Dockerfile                 # Container image for API / UI
-├── docker-compose.yml         # Qdrant + FastAPI + Chainlit stack
+├── docker-compose.yml         # Qdrant + FastAPI + Chainlit + InfluxDB + Grafana stack
 ├── pyproject.toml             # Package metadata and ruff/mypy/pytest settings
 ├── data/kb/                   # 30 synthetic IT knowledge base articles (KB-001..KB-030)
 ├── evals/
 │   ├── dataset.jsonl          # 50 evaluation scenarios
 │   ├── judge_prompts.py       # Prompts for faithfulness, relevance, and refusal scoring
-│   ├── run_evals.py           # CLI evaluation runner
+│   ├── run_evals.py           # CLI evaluation runner (with --resume cache support)
 │   └── results/latest.md      # Latest benchmark summary
 ├── src/helpdesk/
 │   ├── config.py              # Environment / .env settings
 │   ├── ingest.py              # CLI to build and query the KB index
-│   ├── llm.py                 # LiteLLM client, rate-limit throttle, and ScriptedLLM test double
-│   ├── telemetry.py           # SQLite request & LLM call metrics
-│   ├── agent/                 # LangGraph workflow, prompts, and local/MCP tool backends
-│   ├── api/                   # FastAPI application (/chat, /health, /metrics, /tickets)
+│   ├── llm.py                 # LiteLLM client, streaming, rate-limit throttle, and ScriptedLLM
+│   ├── telemetry.py           # SQLite request/LLM metrics, conversation history, Influx exporter
+│   ├── agent/                 # LangGraph workflow, progressive event stream, and tool backends
+│   ├── api/                   # FastAPI application (/chat, /kb, /sla, /webhooks, /metrics)
+│   ├── browser/               # Playwright portal scraper and form autofill + screenshot preview
 │   ├── mcp_server/            # FastMCP stdio server
-│   ├── retrieval/             # Markdown chunker, BM25, Qdrant dense index, RRF, reranker
-│   ├── tickets/               # SQLModel ticket repository, tools, and REST router
+│   ├── retrieval/             # Markdown chunker, BM25, Qdrant dense index, RRF, reranker, watcher
+│   ├── tickets/               # SQLModel ticket repository, SLA calculator, HTML portal, REST API
 │   └── ui/                    # Chainlit chat interface
-└── tests/                     # Unit and integration tests (offline, no API key required)
+└── tests/                     # Unit, API, webhook, SLA, KB, and headless Chromium e2e tests
 ```
 
 ---
@@ -201,9 +206,9 @@ mypy
 - [x] Streaming token responses on `/chat` (SSE) and in the Chainlit UI
 - [x] Persistent conversation history in SQLite
 - [x] Slack / Microsoft Teams webhook adapter
-- [ ] Knowledge Base REST API (/kb) for browsing and searching articles
-- [ ] SLA breach detection and priority escalation alerts
-- [ ] Incremental KB watcher for hot-reloading updated runbooks
+- [x] Knowledge Base REST API (`/kb`) for browsing and searching articles
+- [x] SLA breach detection and priority escalation alerts (`/sla/breaches`)
+- [x] Incremental KB watcher for hot-reloading updated runbooks
 
 ---
 

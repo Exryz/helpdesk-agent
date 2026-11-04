@@ -75,6 +75,36 @@ def load_dataset(path: Path | str) -> list[dict[str, Any]]:
     return rows
 
 
+def load_resume_cache(path: Path | str) -> dict[str, dict[str, Any]]:
+    """Load JSONL cache of per-row evaluation results keyed by row id."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    cache: dict[str, dict[str, Any]] = {}
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                row_id = item.get("id")
+                if row_id:
+                    cache[str(row_id)] = item
+            except json.JSONDecodeError:
+                continue
+    return cache
+
+
+def append_resume_result(path: Path | str, result: dict[str, Any]) -> None:
+    """Append a single successfully evaluated row result to the JSONL cache."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, mode="a", encoding="utf-8") as f:
+        f.write(json.dumps(result) + "\n")
+
+
+
 def _calc_stats(items: list[dict[str, Any]]) -> dict[str, Any]:
     n = len(items)
     if n == 0:
@@ -197,6 +227,8 @@ async def evaluate_agent(
     dataset: list[dict[str, Any]],
     settings: Settings,
     offline: bool = False,
+    resume_path: Path | str | None = None,
+    judge_model: str | None = None,
 ) -> dict[str, Any] | None:
     """Run full agent evaluation across all dataset rows."""
     if offline or not has_llm_api_key():
@@ -222,22 +254,31 @@ async def evaluate_agent(
         timeout_s=settings.llm_timeout_s,
         telemetry=eval_telemetry,
     )
+    effective_judge_model = judge_model or settings.resolved_judge_model
     judge_client = LiteLLMClient(
-        model=settings.resolved_judge_model,
+        model=effective_judge_model,
         temperature=0.0,
         timeout_s=settings.llm_timeout_s,
     )
     retriever = build_retriever(settings=settings)
 
+    cache: dict[str, dict[str, Any]] = load_resume_cache(resume_path) if resume_path else {}
+    cached_count = 0
     results: list[dict[str, Any]] = []
 
     for row in dataset:
+        row_id = str(row.get("id", ""))
+        if row_id in cache and "error" not in cache[row_id]:
+            results.append(cache[row_id])
+            cached_count += 1
+            continue
+
         # Create fresh ticket repository for each question to isolate state
         repo = TicketRepository.from_path(":memory:", seed=True)
         tools = LocalToolBackend(TicketTools(repo))
 
         agent = HelpdeskAgent(
-            llm=llm_client,
+            llm=llm_client,  # type: ignore[arg-type]
             retriever=retriever,
             tools=tools,
             settings=settings,
@@ -347,27 +388,28 @@ async def evaluate_agent(
                 pass
 
         stats = getattr(res, "stats", {}) or {}
-        results.append(
-            {
-                "id": row["id"],
-                "category": category,
-                "citation_accurate": citation_accurate,
-                "tool_accurate": tool_accurate,
-                "refusal_rate": refusal_rate,
-                "faithfulness_score": faithfulness_score,
-                "relevance_score": relevance_score,
-                "latency_ms": stats.get("latency_ms", 0.0),
-                "cost_usd": stats.get("cost_usd", 0.0),
-                "prompt_tokens": stats.get("prompt_tokens", 0),
-                "completion_tokens": stats.get("completion_tokens", 0),
-            }
-        )
+        record = {
+            "id": row["id"],
+            "category": category,
+            "citation_accurate": citation_accurate,
+            "tool_accurate": tool_accurate,
+            "refusal_rate": refusal_rate,
+            "faithfulness_score": faithfulness_score,
+            "relevance_score": relevance_score,
+            "latency_ms": stats.get("latency_ms", 0.0),
+            "cost_usd": stats.get("cost_usd", 0.0),
+            "prompt_tokens": stats.get("prompt_tokens", 0),
+            "completion_tokens": stats.get("completion_tokens", 0),
+        }
+        results.append(record)
+        if resume_path is not None:
+            append_resume_result(resume_path, record)
 
     # Aggregate agent metrics
     valid = [r for r in results if "error" not in r]
     n = len(valid)
     if n == 0:
-        return {"count": 0, "results": results}
+        return {"count": 0, "cached_count": cached_count, "results": results}
 
     refusals = [r["refusal_rate"] for r in valid if r["refusal_rate"] is not None]
     faith_scores = [r["faithfulness_score"] for r in valid if r["faithfulness_score"] is not None]
@@ -375,6 +417,7 @@ async def evaluate_agent(
 
     summary = {
         "count": n,
+        "cached_count": cached_count,
         "citation_accuracy": round(sum(r["citation_accurate"] for r in valid) / n, 4),
         "tool_accuracy": round(sum(r["tool_accurate"] for r in valid) / n, 4),
         "refusal_rate": round(sum(refusals) / len(refusals), 4) if refusals else None,
@@ -445,6 +488,8 @@ def generate_markdown_report(
 
     if agent_data and agent_data.get("summary"):
         s = agent_data["summary"]
+        cached_count = s.get("cached_count", 0)
+        cache_str = f" ({cached_count} from cache)" if cached_count else ""
         refusal_str = f"{s['refusal_rate']:.1%}" if s.get("refusal_rate") is not None else "N/A"
         faith_str = f"{s['faithfulness']:.2f} / 5.0" if s.get("faithfulness") is not None else "N/A"
         rel_str = (
@@ -457,7 +502,8 @@ def generate_markdown_report(
                 "",
                 "| Metric | Result |",
                 "|---|---|",
-                f"| Evaluated Inquiries | {s['count']} |",
+                f"| Evaluated Inquiries | {s['count']}{cache_str} |",
+                f"| Cached Inquiries | {cached_count} |",
                 f"| Citation Accuracy | {s['citation_accuracy']:.1%} |",
                 f"| Tool-Call Accuracy | {s['tool_accuracy']:.1%} |",
                 f"| Out-of-Scope Refusal Rate | {refusal_str} |",
@@ -520,6 +566,18 @@ def parse_args() -> argparse.Namespace:
         help="Path to evaluation dataset JSONL (default: evals/dataset.jsonl)",
     )
     parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Path to JSONL cache for resuming agent evaluation across runs",
+    )
+    parser.add_argument(
+        "--judge-model",
+        type=str,
+        default=None,
+        help="Override LLM judge model (default: from settings)",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -558,7 +616,13 @@ async def async_main() -> None:
 
     if args.mode in ("agent", "all"):
         print(f"[INFO] Running agent evaluation (rows={len(dataset)}, offline={args.offline})...")
-        agent_data = await evaluate_agent(dataset, settings, offline=args.offline)
+        agent_data = await evaluate_agent(
+            dataset,
+            settings,
+            offline=args.offline,
+            resume_path=args.resume,
+            judge_model=args.judge_model,
+        )
 
     # Save output artifacts
     report_data = {

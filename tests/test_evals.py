@@ -6,8 +6,11 @@ import pytest
 
 from evals.run_evals import (
     aggregate_retrieval,
+    append_resume_result,
     hit_at_k,
     load_dataset,
+    load_resume_cache,
+    parse_args,
     recall_at_k,
     reciprocal_rank,
 )
@@ -130,3 +133,56 @@ def test_dataset_schema_and_integrity() -> None:
         # Expected tools must be a subset of TOOL_NAMES
         for tool in row["expected_tools"]:
             assert tool in TOOL_NAMES, f"Row {row['id']} references unknown tool '{tool}'"
+
+
+def test_resume_cache_read_write(tmp_path: pytest.TempPathFactory) -> None:
+    cache_path = tmp_path / "eval_cache.jsonl"  # type: ignore[operator]
+
+    # Non-existent cache returns empty dict
+    assert load_resume_cache(cache_path) == {}
+
+    # Append first result
+    res1 = {"id": "eval-01", "citation_accurate": 1.0, "tool_accurate": 1.0}
+    append_resume_result(cache_path, res1)
+
+    # Append second result
+    res2 = {"id": "eval-02", "citation_accurate": 0.0, "tool_accurate": 1.0}
+    append_resume_result(cache_path, res2)
+
+    # Load cache
+    loaded = load_resume_cache(cache_path)
+    assert len(loaded) == 2
+    assert loaded["eval-01"] == res1
+    assert loaded["eval-02"] == res2
+
+
+def test_resume_cache_handles_corrupt_lines(tmp_path: pytest.TempPathFactory) -> None:
+    cache_path = tmp_path / "corrupt_cache.jsonl"  # type: ignore[operator]
+    cache_path.write_text(
+        '{"id": "ok-01", "citation_accurate": 1.0}\n'
+        'invalid json line here\n'
+        '\n'
+        '{"id": "ok-02", "citation_accurate": 0.5}\n',
+        encoding="utf-8",
+    )
+    loaded = load_resume_cache(cache_path)
+    assert len(loaded) == 2
+    assert "ok-01" in loaded
+    assert "ok-02" in loaded
+
+
+def test_parse_args_resume_and_judge_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_evals.py",
+            "--resume",
+            "evals/test_cache.jsonl",
+            "--judge-model",
+            "gemini/gemini-2.0-flash",
+        ],
+    )
+    args = parse_args()
+    assert str(args.resume).replace("\\", "/").endswith("evals/test_cache.jsonl")
+    assert args.judge_model == "gemini/gemini-2.0-flash"
+
