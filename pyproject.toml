@@ -9,7 +9,7 @@ description = "An open-source IT helpdesk agent: hybrid RAG with citations, tick
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Paul Andrei Datinguinoo" }]
+authors = [{ name = "Exryz" }]
 dependencies = [
     "litellm>=1.50",
     "langgraph>=0.2",

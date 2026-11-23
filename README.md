@@ -214,4 +214,4 @@ mypy
 
 ## License
 
-[MIT](LICENSE) © 2026 Paul Andrei Datinguinoo
+[MIT](LICENSE) © 2026 Exryz
